@@ -42,11 +42,11 @@ spec:
               protocol: TCP
           {{- if .Values.health.livenessProbe.enabled }}
           livenessProbe:
-            {{- toYaml .Values.health.livenessProbe | nindent 12 }}
+            {{- omit .Values.health.livenessProbe "enabled" | toYaml | nindent 12 }}
           {{- end }}
           {{- if .Values.health.readinessProbe.enabled }}
           readinessProbe:
-            {{- toYaml .Values.health.readinessProbe | nindent 12 }}
+            {{- omit .Values.health.readinessProbe "enabled" | toYaml | nindent 12 }}
           {{- end }}
           envFrom:
             - secretRef:
