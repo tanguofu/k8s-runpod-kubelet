@@ -708,11 +708,12 @@ func (c *Client) DeployPod(params map[string]interface{}) (string, float64, erro
 	return response.Data.PodFindAndDeployOnDemand.ID, response.Data.PodFindAndDeployOnDemand.CostPerHr, nil
 }
 
-// TerminatePod terminates a RunPod instance by ID
+// TerminatePod terminates (fully deletes) a RunPod instance by ID
+// This uses DELETE /pods/{podId} to completely remove the pod and stop all billing
 func (c *Client) TerminatePod(podID string) error {
-	endpoint := fmt.Sprintf("/pods/%s/stop", podID)
+	endpoint := fmt.Sprintf("/pods/%s", podID)
 
-	resp, err := c.makeRESTRequest("POST", endpoint, nil)
+	resp, err := c.makeRESTRequest("DELETE", endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -730,7 +731,8 @@ func (c *Client) TerminatePod(podID string) error {
 		return fmt.Errorf("invalid pod ID: %s", podID)
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	// DELETE endpoint returns 204 No Content on success, or 200 OK
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to terminate pod, status: %d, response: %s", resp.StatusCode, string(body))
 	}
