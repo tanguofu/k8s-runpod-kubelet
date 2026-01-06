@@ -378,10 +378,70 @@ func NewProvider(ctx context.Context, nodeName, operatingSystem string, internal
 	return provider, nil
 }
 
+// isSystemPod checks if a pod is a system pod that should not be deployed to RunPod
+func (p *Provider) isSystemPod(pod *v1.Pod) bool {
+	// Skip pods in system namespaces
+	systemNamespaces := []string{
+		"kube-system",
+		"kube-public",
+		"kube-node-lease",
+	}
+	for _, ns := range systemNamespaces {
+		if pod.Namespace == ns {
+			return true
+		}
+	}
+
+	// Skip pods owned by DaemonSets (typically system components)
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "DaemonSet" {
+			return true
+		}
+	}
+
+	// Skip pods with system labels
+	if pod.Labels != nil {
+		// CSI drivers
+		if pod.Labels["app"] == "csi-cinder-nodeplugin" ||
+			pod.Labels["app.kubernetes.io/name"] == "csi-cinder-nodeplugin" {
+			return true
+		}
+		// Other CSI drivers pattern
+		if strings.HasPrefix(pod.Labels["app"], "csi-") ||
+			strings.HasPrefix(pod.Labels["app.kubernetes.io/name"], "csi-") {
+			return true
+		}
+		// kube-proxy
+		if pod.Labels["component"] == "kube-proxy" ||
+			pod.Labels["k8s-app"] == "kube-proxy" {
+			return true
+		}
+		// CNI plugins
+		if pod.Labels["app"] == "calico-node" ||
+			pod.Labels["app"] == "flannel" ||
+			pod.Labels["k8s-app"] == "calico-node" ||
+			pod.Labels["k8s-app"] == "flannel" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Implementation of required interface methods to fulfill the PodLifecycleHandler interface
 
 // CreatePod takes a Kubernetes Pod and deploys it within the provider
 func (p *Provider) CreatePod(ctx context.Context, pod *v1.Pod) error {
+	// Skip system pods that should not be deployed to RunPod
+	if p.isSystemPod(pod) {
+		p.logger.Debug("Skipping system pod",
+			"pod", pod.Name,
+			"namespace", pod.Namespace)
+		// Return nil to indicate success but don't actually deploy
+		// This prevents the pod from being retried
+		return nil
+	}
+
 	// Store the pod in our tracking map
 	podKey := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	
@@ -1417,6 +1477,14 @@ func (p *Provider) LoadRunning() {
 
 	// Step 4: Process kubernetes pods assigned to this node
 	for _, pod := range k8sPods.Items {
+		// Skip system pods
+		if p.isSystemPod(&pod) {
+			p.logger.Debug("Skipping system pod in LoadRunning",
+				"pod", pod.Name,
+				"namespace", pod.Namespace)
+			continue
+		}
+
 		// Skip pods that are already completed, failed, or terminating
 		if pod.Status.Phase == v1.PodSucceeded ||
 			pod.Status.Phase == v1.PodFailed ||
