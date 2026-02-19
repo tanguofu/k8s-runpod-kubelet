@@ -1154,6 +1154,7 @@ func (p *Provider) NotifyNodeStatus(ctx context.Context, cb func(*v1.Node)) {
 	}()
 }
 
+
 // Helper to get current node status
 func (p *Provider) GetNodeStatus() *v1.Node {
 	node := &v1.Node{
@@ -1168,6 +1169,11 @@ func (p *Provider) GetNodeStatus() *v1.Node {
 			},
 		},
 		Spec: v1.NodeSpec{
+			// ProviderID identifies this node to cloud controller managers (CCMs).
+			// Without it, CCMs like OpenStack CCM treat the node as a cloud instance,
+			// fail to find it in the cloud provider, and delete it — which wipes
+			// Spec.Taints on every recreation cycle.
+			ProviderID: "runpod://" + p.nodeName,
 			Taints: []v1.Taint{
 				{
 					Key:    "virtual-kubelet.io/provider",
