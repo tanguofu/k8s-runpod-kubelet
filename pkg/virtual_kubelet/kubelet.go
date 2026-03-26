@@ -9,12 +9,14 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"io"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -298,6 +300,7 @@ func (p *Provider) startPeriodicStatusUpdates() {
 		case <-ticker.C:
 			p.updateAllPodStatuses()
 			p.checkRunPodAPIHealth()
+			p.syncEndpointSlices()
 		}
 	}
 }
@@ -2318,4 +2321,255 @@ func (p *Provider) GetContainerLogs(ctx context.Context, namespace, podName, con
 	   // Convert string to ReadCloser
 	   return io.NopCloser(strings.NewReader(logs)), nil
 	*/
+}
+
+// syncEndpointSlices creates or updates EndpointSlices for Services that target RunPod pods.
+// RunPod pods have fake cluster IPs (10.0.0.2) that are not routable, so real public IPs
+// and external port mappings from RunPod are used instead.
+func (p *Provider) syncEndpointSlices() {
+	// Collect a snapshot of running pods with their status under read lock.
+	type podSnapshot struct {
+		pod     *v1.Pod
+		podInfo *InstanceInfo
+	}
+
+	p.podsMutex.RLock()
+	snapshots := make([]podSnapshot, 0, len(p.pods))
+	for _, pod := range p.pods {
+		podKey := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
+		podInfo := p.podStatus[podKey]
+		if podInfo == nil {
+			continue
+		}
+		snapshots = append(snapshots, podSnapshot{pod: pod, podInfo: podInfo})
+	}
+	p.podsMutex.RUnlock()
+
+	// Group pods by namespace so we can list Services per namespace once.
+	nsPods := make(map[string][]podSnapshot)
+	for _, snap := range snapshots {
+		ns := snap.pod.Namespace
+		nsPods[ns] = append(nsPods[ns], snap)
+	}
+
+	for ns, pods := range nsPods {
+		// List Services in the namespace that opt in to managed endpoints.
+		svcList, err := p.clientset.CoreV1().Services(ns).List(
+			context.Background(),
+			metav1.ListOptions{},
+		)
+		if err != nil {
+			p.logger.Error("syncEndpointSlices: failed to list services",
+				"namespace", ns, "error", err)
+			continue
+		}
+
+		for i := range svcList.Items {
+			svc := &svcList.Items[i]
+			if svc.Annotations["runpod.io/managed-endpoints"] != "true" {
+				continue
+			}
+
+			// Build the set of label selector requirements from the annotation.
+			// Using annotation instead of svc.Spec.Selector so the Service has no selector
+			// and the default endpoint controller does not create conflicting EndpointSlices.
+			selectorStr := svc.Annotations["runpod.io/pod-selector"]
+			if selectorStr == "" {
+				continue
+			}
+			selector := make(map[string]string)
+			for _, pair := range strings.Split(selectorStr, ",") {
+				kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+				if len(kv) == 2 {
+					selector[kv[0]] = kv[1]
+				}
+			}
+
+			// One EndpointSlice per pod — each RunPod instance has its own external port.
+			// kube-proxy merges all slices for a Service and balances across them.
+			managedBy := "runpod-kubelet"
+			addrType := discoveryv1.AddressTypeIPv4
+			isController := true
+
+			// Track which EndpointSlice names we create/update so we can clean up stale ones.
+			activeSliceNames := make(map[string]bool)
+
+			for _, snap := range pods {
+				pod := snap.pod
+				podInfo := snap.podInfo
+
+				// Only process RUNNING pods with ports exposed and a known public IP.
+				if podInfo.Status != string(PodRunning) || !podInfo.PortsExposed || podInfo.PublicIP == "" {
+					continue
+				}
+
+				// Check that all selector labels match the pod's labels.
+				matched := true
+				for k, v := range selector {
+					if pod.Labels[k] != v {
+						matched = false
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
+
+				isReady := p.computeIsReady(pod, podInfo)
+
+				// Build per-pod endpoint and ports.
+				var addrs []string
+				var podPorts []discoveryv1.EndpointPort
+
+				for _, requestedPort := range podInfo.RequestedPorts {
+					parts := strings.SplitN(requestedPort, "/", 2)
+					if len(parts) != 2 {
+						continue
+					}
+					internalPortStr := parts[0]
+					protocol := strings.ToLower(parts[1])
+
+					if protocol == "http" || protocol == "https" {
+						// HTTP порт: резолвим RunPod proxy домен.
+						podID := pod.Annotations[PodIDAnnotation]
+						if podID == "" {
+							continue
+						}
+						proxyHost := fmt.Sprintf("%s-%s.proxy.runpod.net", podID, internalPortStr)
+						resolved, resolveErr := net.LookupHost(proxyHost)
+						if resolveErr != nil || len(resolved) == 0 {
+							p.logger.Debug("syncEndpointSlices: failed to resolve proxy host",
+								"host", proxyHost, "error", resolveErr)
+							continue
+						}
+						addrs = append(addrs, resolved[0])
+						proto := v1.ProtocolTCP
+						portNum := int32(443)
+						portName := "https-" + internalPortStr
+						podPorts = append(podPorts, discoveryv1.EndpointPort{
+							Name: &portName, Protocol: &proto, Port: &portNum,
+						})
+					} else {
+						// TCP порт: publicIP + external port из маппинга.
+						externalPort, ok := podInfo.ExternalPortMappings[internalPortStr]
+						if !ok {
+							continue
+						}
+						addrs = append(addrs, podInfo.PublicIP)
+						proto := v1.ProtocolTCP
+						portNum := int32(externalPort)
+						portName := "tcp-" + internalPortStr
+						podPorts = append(podPorts, discoveryv1.EndpointPort{
+							Name: &portName, Protocol: &proto, Port: &portNum,
+						})
+					}
+				}
+
+				if len(addrs) == 0 || len(podPorts) == 0 {
+					continue
+				}
+
+				// Дедупликация адресов.
+				uniqueAddrs := make([]string, 0, len(addrs))
+				seen := make(map[string]bool)
+				for _, a := range addrs {
+					if !seen[a] {
+						seen[a] = true
+						uniqueAddrs = append(uniqueAddrs, a)
+					}
+				}
+
+				readyVal := isReady
+				sliceName := fmt.Sprintf("%s-runpod-%s", svc.Name, pod.Name)
+				// K8s ограничивает имена 63 символами.
+				if len(sliceName) > 63 {
+					sliceName = sliceName[:63]
+				}
+				activeSliceNames[sliceName] = true
+
+				desired := &discoveryv1.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sliceName,
+						Namespace: ns,
+						Labels: map[string]string{
+							"kubernetes.io/service-name":              svc.Name,
+							"endpointslice.kubernetes.io/managed-by": managedBy,
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "v1",
+								Kind:       "Service",
+								Name:       svc.Name,
+								UID:        svc.UID,
+								Controller: &isController,
+							},
+						},
+					},
+					AddressType: addrType,
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Addresses: uniqueAddrs,
+							Conditions: discoveryv1.EndpointConditions{
+								Ready: &readyVal,
+							},
+							TargetRef: &v1.ObjectReference{
+								Kind:      "Pod",
+								Namespace: pod.Namespace,
+								Name:      pod.Name,
+								UID:       pod.UID,
+							},
+						},
+					},
+					Ports: podPorts,
+				}
+
+				// Create or update.
+				existing, getErr := p.clientset.DiscoveryV1().EndpointSlices(ns).Get(
+					context.Background(), sliceName, metav1.GetOptions{},
+				)
+				if k8serrors.IsNotFound(getErr) {
+					if _, createErr := p.clientset.DiscoveryV1().EndpointSlices(ns).Create(
+						context.Background(), desired, metav1.CreateOptions{},
+					); createErr != nil {
+						p.logger.Error("syncEndpointSlices: failed to create",
+							"slice", sliceName, "error", createErr)
+					} else {
+						p.logger.Info("syncEndpointSlices: created EndpointSlice",
+							"slice", sliceName, "addresses", uniqueAddrs, "ports", podPorts)
+					}
+				} else if getErr == nil {
+					existing.Endpoints = desired.Endpoints
+					existing.Ports = desired.Ports
+					existing.Labels = desired.Labels
+					if _, updateErr := p.clientset.DiscoveryV1().EndpointSlices(ns).Update(
+						context.Background(), existing, metav1.UpdateOptions{},
+					); updateErr != nil {
+						p.logger.Error("syncEndpointSlices: failed to update",
+							"slice", sliceName, "error", updateErr)
+					}
+				}
+			}
+
+			// Cleanup: удаляем EndpointSlice'ы для подов, которых больше нет.
+			existingSlices, listErr := p.clientset.DiscoveryV1().EndpointSlices(ns).List(
+				context.Background(),
+				metav1.ListOptions{
+					LabelSelector: fmt.Sprintf("kubernetes.io/service-name=%s,endpointslice.kubernetes.io/managed-by=%s", svc.Name, managedBy),
+				},
+			)
+			if listErr == nil {
+				for idx := range existingSlices.Items {
+					name := existingSlices.Items[idx].Name
+					if !activeSliceNames[name] {
+						if delErr := p.clientset.DiscoveryV1().EndpointSlices(ns).Delete(
+							context.Background(), name, metav1.DeleteOptions{},
+						); delErr == nil {
+							p.logger.Info("syncEndpointSlices: deleted stale EndpointSlice",
+								"slice", name, "service", svc.Name)
+						}
+					}
+				}
+			}
+		}
+	}
 }
