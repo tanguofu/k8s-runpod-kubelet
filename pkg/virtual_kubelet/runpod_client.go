@@ -44,6 +44,17 @@ const (
 	ContainerRegistryAuthAnnotation = "runpod.io/container-registry-auth-id"
 	DatacenterAnnotation            = "runpod.io/datacenter-ids" // Comma-separated list preferred
 	PortsAnnotation                 = "runpod.io/ports"          // Manual override for port specifications
+
+	// Disk and volume configuration.
+	ContainerDiskGbAnnotation    = "runpod.io/container-disk-gb"
+	VolumeGbAnnotation           = "runpod.io/volume-gb"
+	VolumeMountPathAnnotation    = "runpod.io/volume-mount-path"
+	NetworkVolumeIdAnnotation    = "runpod.io/network-volume-id"
+
+	// Cost optimization and compatibility.
+	InterruptibleAnnotation       = "runpod.io/interruptible"
+	AllowedCudaVersionsAnnotation = "runpod.io/allowed-cuda-versions"
+
 	// DefaultMaxPrice for GPU
 	DefaultMaxPrice = 0.5
 
@@ -1337,9 +1348,28 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 		ports = overridePorts
 	}
 
-	// Default values
-	volumeInGb := 0
+	// Default values; may be overridden by annotations.
 	containerDiskInGb := 15
+	if diskGbStr, exists := pod.Annotations[ContainerDiskGbAnnotation]; exists {
+		if val, err := strconv.Atoi(diskGbStr); err == nil {
+			containerDiskInGb = val
+			c.logger.Info("Using container disk size from annotation",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"containerDiskInGb", containerDiskInGb)
+		}
+	}
+
+	volumeInGb := 0
+	if volumeGbStr, exists := pod.Annotations[VolumeGbAnnotation]; exists {
+		if val, err := strconv.Atoi(volumeGbStr); err == nil {
+			volumeInGb = val
+			c.logger.Info("Using volume size from annotation",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"volumeInGb", volumeInGb)
+		}
+	}
 
 	// Create deployment parameters
 	params := map[string]interface{}{
@@ -1356,6 +1386,7 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 	// Map K8s container spec to RunPod REST API docker override fields.
 	// K8s `command` = Docker ENTRYPOINT → RunPod `dockerEntrypoint` (array).
 	// K8s `args` = Docker CMD → RunPod `dockerStartCmd` (array).
+	// RunPod later reverted the dockerArgs approach in favour of these dedicated fields.
 	if len(pod.Spec.Containers) > 0 {
 		container := pod.Spec.Containers[0]
 		if len(container.Command) > 0 {
@@ -1399,6 +1430,59 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 
 	if containerRegistryAuthId != "" {
 		params["containerRegistryAuthId"] = containerRegistryAuthId
+	}
+
+	// Volume mount path — only set if annotation is present.
+	if volumeMountPath, exists := pod.Annotations[VolumeMountPathAnnotation]; exists && volumeMountPath != "" {
+		params["volumeMountPath"] = volumeMountPath
+		c.logger.Info("Using volume mount path from annotation",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"volumeMountPath", volumeMountPath)
+	}
+
+	// Network volume ID — only set if annotation is present.
+	if networkVolumeId, exists := pod.Annotations[NetworkVolumeIdAnnotation]; exists && networkVolumeId != "" {
+		params["networkVolumeId"] = networkVolumeId
+		c.logger.Info("Using network volume ID from annotation",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"networkVolumeId", networkVolumeId)
+	}
+
+	// Spot instances (interruptible) — 40-70% cheaper; only set if explicitly specified.
+	if interruptibleStr, exists := pod.Annotations[InterruptibleAnnotation]; exists {
+		interruptible := strings.ToLower(interruptibleStr) == "true"
+		params["interruptible"] = interruptible
+		c.logger.Info("Using interruptible setting from annotation",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"interruptible", interruptible)
+	}
+
+	// Allowed CUDA versions — guards against CUDA incompatibility.
+	if cudaVersionsStr, exists := pod.Annotations[AllowedCudaVersionsAnnotation]; exists && cudaVersionsStr != "" {
+		cudaVersions := strings.Split(cudaVersionsStr, ",")
+		for i, v := range cudaVersions {
+			cudaVersions[i] = strings.TrimSpace(v)
+		}
+		params["allowedCudaVersions"] = cudaVersions
+		c.logger.Info("Using allowed CUDA versions from annotation",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"allowedCudaVersions", cudaVersions)
+	}
+
+	// GPU count from K8s resource requests; default is 1 (RunPod default).
+	if len(pod.Spec.Containers) > 0 {
+		gpuReq := pod.Spec.Containers[0].Resources.Requests["nvidia.com/gpu"]
+		if gpuCount, ok := gpuReq.AsInt64(); ok && gpuCount > 1 {
+			params["gpuCount"] = gpuCount
+			c.logger.Info("Setting multi-GPU count from resource requests",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"gpuCount", gpuCount)
+		}
 	}
 
 	// Return both params and the ports that were requested
