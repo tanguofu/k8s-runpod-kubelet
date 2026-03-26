@@ -1344,6 +1344,25 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 		"env":               formattedEnvVars,
 	}
 	
+	// Map K8s container spec to RunPod REST API docker override fields.
+	// K8s `command` = Docker ENTRYPOINT → RunPod `dockerEntrypoint` (array).
+	// K8s `args` = Docker CMD → RunPod `dockerStartCmd` (array).
+	if len(pod.Spec.Containers) > 0 {
+		container := pod.Spec.Containers[0]
+		if len(container.Command) > 0 {
+			params["dockerEntrypoint"] = container.Command
+			c.logger.Info("Setting dockerEntrypoint from pod spec",
+				"pod", pod.Name,
+				"dockerEntrypoint", container.Command)
+		}
+		if len(container.Args) > 0 {
+			params["dockerStartCmd"] = container.Args
+			c.logger.Info("Setting dockerStartCmd from pod spec",
+				"pod", pod.Name,
+				"dockerStartCmd", container.Args)
+		}
+	}
+
 	// Add ports to parameters if any were specified
 	if len(ports) > 0 {
 		params["ports"] = ports
