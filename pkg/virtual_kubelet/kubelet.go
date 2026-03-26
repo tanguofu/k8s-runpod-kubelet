@@ -1773,7 +1773,9 @@ func (p *Provider) LoadRunning() {
 
 // fetchRunPodInstances fetches both running and exited pods from the RunPod API
 func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []RunPodInstance, ok bool) {
-	// Make a request to the RunPod API to get all running pods
+	// Make a request to the RunPod API to get all running pods.
+	// NOTE: RunPod API only supports desiredStatus=RUNNING|EXITED|TERMINATED.
+	// STARTING pods are not queryable — they will appear as RUNNING once ready.
 	runningPods, ok := p.fetchRunPodInstancesByStatus("RUNNING")
 	if !ok {
 		return nil, nil, false
