@@ -106,6 +106,14 @@ type InstanceInfo struct {
 	CreationTime  time.Time
 	RequestedPorts []string  // Ports that were requested for this pod
 	PortsExposed  bool      // Tracks whether requested ports are currently exposed
+
+	// Readiness probe state
+	ReadinessProbeReady   bool      // Whether the readiness probe has passed
+	ReadinessFailCount    int       // Consecutive failure count
+	ReadinessLastCheck    time.Time // Last probe check time
+	RunningStartTime      time.Time // When pod first entered RUNNING state (for initialDelaySeconds)
+	PublicIP              string    // Public IP from RunPod API
+	ExternalPortMappings  map[string]int // Internal port -> external port
 }
 
 type DetailedStatus struct {
@@ -117,6 +125,7 @@ type DetailedStatus struct {
 	Image                  string            `json:"image"`
 	Env                    map[string]string `json:"env"`
 	MachineID              string            `json:"machineId"`
+	PublicIP               string            `json:"publicIp"`
 	PortMappings           map[string]int    `json:"portMappings"`
 	Runtime                *RuntimeInfo      `json:"runtime,omitempty"`
 	Machine                *MachineInfo      `json:"machine,omitempty"`
