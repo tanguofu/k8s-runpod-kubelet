@@ -1363,16 +1363,16 @@ func (p *Provider) GetNodeStatus() *v1.Node {
 				KubeletVersion:  "v1.19.0",
 			},
 			Capacity: v1.ResourceList{
-				v1.ResourceCPU:    resource.MustParse("20"),
-				v1.ResourceMemory: resource.MustParse("100Gi"),
-				v1.ResourcePods:   resource.MustParse("100"),
-				"nvidia.com/gpu":  resource.MustParse("4"), //always 4 but it would be cool to make this dynamic
+				v1.ResourceCPU:    resource.MustParse(p.config.NodeCapacityCPU),
+				v1.ResourceMemory: resource.MustParse(p.config.NodeCapacityMemory),
+				v1.ResourcePods:   resource.MustParse(p.config.NodeCapacityPods),
+				"nvidia.com/gpu":  resource.MustParse(p.config.NodeCapacityGPU),
 			},
 			Allocatable: v1.ResourceList{
-				v1.ResourceCPU:    resource.MustParse("20"),
-				v1.ResourceMemory: resource.MustParse("100Gi"),
-				v1.ResourcePods:   resource.MustParse("100"),
-				"nvidia.com/gpu":  resource.MustParse("4"),
+				v1.ResourceCPU:    resource.MustParse(p.config.NodeCapacityCPU),
+				v1.ResourceMemory: resource.MustParse(p.config.NodeCapacityMemory),
+				v1.ResourcePods:   resource.MustParse(p.config.NodeCapacityPods),
+				"nvidia.com/gpu":  resource.MustParse(p.config.NodeCapacityGPU),
 			},
 			Conditions: []v1.NodeCondition{
 				{

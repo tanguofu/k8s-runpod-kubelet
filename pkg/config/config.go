@@ -23,4 +23,17 @@ type Config struct {
 
 	// DatacenterIDs is a comma-separated list of preferred datacenter IDs for pod placement
 	DatacenterIDs string
+
+	// NodeCapacityCPU is the CPU capacity reported to the Kubernetes scheduler.
+	// This is a virtual limit — RunPod pods run on remote machines, not on this node.
+	NodeCapacityCPU string
+
+	// NodeCapacityMemory is the memory capacity reported to the Kubernetes scheduler.
+	NodeCapacityMemory string
+
+	// NodeCapacityGPU is the GPU capacity reported to the Kubernetes scheduler.
+	NodeCapacityGPU string
+
+	// NodeCapacityPods is the max pod count reported to the Kubernetes scheduler.
+	NodeCapacityPods string
 }

@@ -49,6 +49,10 @@ kubelet:
   maxGpuPrice: 0.5
   healthServerAddress: ":8080"
   namespace: kube-system
+  nodeCapacityCPU: "100"
+  nodeCapacityMemory: "1Ti"
+  nodeCapacityGPU: "100"
+  nodeCapacityPods: "100"
 
 cluster:
   identifier: ""  # If empty, a unique identifier will be generated

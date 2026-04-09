@@ -36,6 +36,10 @@ spec:
             - "--reconcile-interval={{ .Values.kubelet.reconcileInterval }}"
             - "--max-gpu-price={{ .Values.kubelet.maxGpuPrice }}"
             - "--health-server-address={{ .Values.kubelet.healthServerAddress }}"
+            - "--node-capacity-cpu={{ .Values.kubelet.nodeCapacityCPU }}"
+            - "--node-capacity-memory={{ .Values.kubelet.nodeCapacityMemory }}"
+            - "--node-capacity-gpu={{ .Values.kubelet.nodeCapacityGPU }}"
+            - "--node-capacity-pods={{ .Values.kubelet.nodeCapacityPods }}"
           ports:
             - name: http
               containerPort: {{ .Values.health.port }}
