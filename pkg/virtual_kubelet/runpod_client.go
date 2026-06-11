@@ -41,6 +41,7 @@ const (
 	CloudTypeAnnotation             = "runpod.io/cloud-type"
 	TemplateIdAnnotation            = "runpod.io/templateId"
 	GpuMemoryAnnotation             = "runpod.io/required-gpu-memory"
+	GpuTypeIdsAnnotation            = "runpod.io/gpu-type-ids" // Comma-separated list of RunPod gpuType IDs (e.g. "NVIDIA GeForce RTX 4090"). When set, bypasses GetGPUTypes discovery — caller pins the exact model(s). Memory/price filters do not apply; datacenter and cloud-type still do.
 	ContainerRegistryAuthAnnotation = "runpod.io/container-registry-auth-id"
 	DatacenterAnnotation            = "runpod.io/datacenter-ids" // Comma-separated list preferred
 	PortsAnnotation                 = "runpod.io/ports"          // Manual override for port specifications
@@ -1299,10 +1300,29 @@ func (c *Client) PrepareRunPodParameters(pod *v1.Pod, graphql bool) (map[string]
 	memStr := getAnnotation(GpuMemoryAnnotation, "")
 	minRAMPerGPU := extractGPUMemory(memStr)
 
-	// Get GPU types - pass the cloud type to filter correctly
-	gpuTypes, err := c.GetGPUTypes(minRAMPerGPU, DefaultMaxPrice, cloudType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get GPU types: %w", err)
+	// Explicit GPU type pin via annotation bypasses discovery entirely.
+	// RunPod still enforces cloud-type/datacenter; memory and price filters are
+	// the caller's responsibility once they pin a model.
+	var gpuTypes []string
+	if override := getAnnotation(GpuTypeIdsAnnotation, ""); override != "" {
+		for _, id := range strings.Split(override, ",") {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				gpuTypes = append(gpuTypes, trimmed)
+			}
+		}
+		c.logger.Info("Using explicit GPU type IDs from annotation",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"gpuTypeIds", gpuTypes)
+	} else {
+		var err error
+		gpuTypes, err = c.GetGPUTypes(minRAMPerGPU, DefaultMaxPrice, cloudType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get GPU types: %w", err)
+		}
+	}
+	if len(gpuTypes) == 0 {
+		return nil, fmt.Errorf("no GPU types resolved for pod %s/%s", pod.Namespace, pod.Name)
 	}
 
 	// Extract environment variables from job
