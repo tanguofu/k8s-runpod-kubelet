@@ -3,6 +3,8 @@ package runpod
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/bsvogler/k8s-runpod-kubelet/pkg/config"
@@ -1889,7 +1891,6 @@ func (p *Provider) fetchRunPodInstances() (running []RunPodInstance, exited []Ru
 	return runningPods, exitedPods, true
 }
 
-<<<<<<< HEAD
 // processRunPodInstance processes a single RunPod instance
 func (p *Provider) processRunPodInstance(runpodInstance RunPodInstance, existingRunPodMap map[string]InstanceInfo) {
 	// Skip if this RunPod instance is already represented in the cluster
@@ -2595,11 +2596,16 @@ func (p *Provider) syncEndpointSlices() {
 				}
 
 				readyVal := isReady
-				sliceName := fmt.Sprintf("%s-runpod-%s", svc.Name, pod.Name)
-				// K8s ограничивает имена 63 символами.
-				if len(sliceName) > 63 {
-					sliceName = sliceName[:63]
-				}
+				// EndpointSlice is scoped to a Service by the kubernetes.io/service-name
+				// label, not by metadata.name. Keep the object name opaque and short:
+				// it is only a Kubernetes object identity and is not used in Service DNS.
+				//
+				// We still create one slice per (Service, Pod) pair. The same RunPod pod
+				// can be selected by multiple Services, and each Service may have its own
+				// port names. EndpointSlice ports are slice-wide, while RunPod external
+				// port mappings are pod-specific, so packing several RunPod pods into one
+				// slice would be easy to get wrong.
+				sliceName := endpointSliceName(ns, svc.Name, string(svc.UID), pod.Name, string(pod.UID))
 				activeSliceNames[sliceName] = true
 
 				desired := &discoveryv1.EndpointSlice{
@@ -2656,6 +2662,7 @@ func (p *Provider) syncEndpointSlices() {
 					existing.Endpoints = desired.Endpoints
 					existing.Ports = desired.Ports
 					existing.Labels = desired.Labels
+					existing.OwnerReferences = desired.OwnerReferences
 					if _, updateErr := p.clientset.DiscoveryV1().EndpointSlices(ns).Update(
 						context.Background(), existing, metav1.UpdateOptions{},
 					); updateErr != nil {
@@ -2687,4 +2694,26 @@ func (p *Provider) syncEndpointSlices() {
 			}
 		}
 	}
+}
+
+const (
+	endpointSliceNameMaxLength = 63
+	endpointSliceNamePrefix    = "rnpd-"
+	endpointSliceHashLength    = 24
+)
+
+func endpointSliceName(namespace, serviceName, serviceUID, podName, podUID string) string {
+	// metadata.name is not part of Kubernetes Service discovery. kube-proxy and
+	// CoreDNS associate EndpointSlices with Services through the
+	// "kubernetes.io/service-name" label. The name only has to be stable and
+	// unique in the namespace so reconcile can get/update/delete the same object.
+	//
+	// Hash both Service and Pod identity. A single pod may legitimately be
+	// selected by more than one Service, and those Services must get distinct
+	// EndpointSlices because the service-name label and port names are different.
+	identity := fmt.Sprintf("%s/%s/%s/%s/%s", namespace, serviceName, serviceUID, podName, podUID)
+	sum := sha256.Sum256([]byte(identity))
+	hash := hex.EncodeToString(sum[:])[:endpointSliceHashLength]
+
+	return endpointSliceNamePrefix + hash
 }

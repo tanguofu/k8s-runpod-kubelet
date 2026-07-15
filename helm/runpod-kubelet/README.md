@@ -87,6 +87,25 @@ spec:
         nvidia.com/gpu: 1
 ```
 
+## Managed EndpointSlices
+
+For selector-less Services with `runpod.io/managed-endpoints: "true"`, the
+kubelet creates EndpointSlices for matching RunPod pods. The Service association
+is done through the `kubernetes.io/service-name` label, not through the
+EndpointSlice object name.
+
+EndpointSlice names are intentionally opaque:
+
+```text
+rnpd-<24 hex chars>
+```
+
+The hash includes Service identity and Pod identity. This allows multiple
+Services to select the same RunPod pod without object-name conflicts. Each
+Service still gets its own EndpointSlice because the `kubernetes.io/service-name`
+label and Service port names are Service-specific. The EndpointSlice name is not
+used in DNS; Service DNS remains `<service>.<namespace>.svc.cluster.local`.
+
 ## Uninstalling
 
 ```bash
